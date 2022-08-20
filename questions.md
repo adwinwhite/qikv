@@ -81,7 +81,11 @@ What kind of data structure should be used for Memtable?
 		How to represent Key/Value type?
 			Raw bytes. Use Vec<u8> or String.
 			Use Option for Value and None means Tombstone. Use alias.
+				No, it won't work.
+				If get() returns None, that's Tombstone or nonexistence?
 			Tombstone only exists in memtable and log.
+				No, it's not. 
+				Tombstone can affect pairs in older SStables.
 		How to mark deletion properly?
 			LevelDB encodes it in the key.
 
@@ -116,4 +120,25 @@ How does db know whether to recover from log?
 	Simple.
 	If there exist log files, then a crash happened.
 	When db shuts down gracefully, we flush memtable to SStable and clean log files.
+
+What are properties of SStables?
+	Each key is unique in one file.
+	Pairs are sorted by key.
+
+What is the format of sstable files?
+	Oh, levelDB's table format is truly sophisticated.
+	I'll just use a much simpler one.
+	Since main purpose of SStable is to speed up query access, the only additional data we store is sparse index.
+		[ Record * N ]
+		[ Index * M ]
+		[ Size of index ]
+
+What does in-memory sstable do?
+	Get()
+	::Compaction(SStables)
+
+How to scan over memtable, SStables?
+	Use iterator like LevelDB.
+	And remember that sstables in the same level are not overlapping except for level 0.
+
 

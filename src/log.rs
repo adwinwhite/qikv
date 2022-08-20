@@ -32,9 +32,9 @@ use std::vec::Vec;
 
 use anyhow::{Result, bail};
 
-const LOG_FILENAME: &str = "RECOVERY_LOG";
-const LOG_MAX_SIZE: u64 = 4 * u64::pow(2, 20);
-const PAYLOAD_MAX_SIZE: usize = usize::pow(2, 16);
+pub const LOG_FILENAME: &str = "RECOVERY_LOG";
+pub const LOG_FILE_MAX_SIZE: u64 = 4 * u64::pow(2, 20);
+pub const PAYLOAD_MAX_SIZE: usize = usize::pow(2, 16);
 
 pub struct LogWriter {
     file: File,
@@ -43,7 +43,7 @@ pub struct LogWriter {
 impl LogWriter {
     // Path will where log files are placed.
     // Directories will be created if not exist.
-    pub fn new(dir_path: &str) -> Result<LogWriter> {
+    pub fn new(dir_path: &Path) -> Result<LogWriter> {
         let log_path = Path::new(dir_path).join(LOG_FILENAME);
         let file = File::options()
             .append(true)
@@ -67,6 +67,10 @@ impl LogWriter {
         }
     }
 
+    pub fn len(&self) -> Result<u64> {
+        Ok(self.file.metadata()?.len())
+    }
+
 
 }
 
@@ -82,6 +86,9 @@ impl<'a> Iterator for LogIter<'a> {
     // Done if size is 0.
     // Assume data is not corrupted.
     fn next(&mut self) -> Option<Self::Item> {
+        if self.cur + 2 > self.buf.len() {
+            self.done = true;
+        }
         if self.done {
             return None;
         }
@@ -93,8 +100,10 @@ impl<'a> Iterator for LogIter<'a> {
             return None;
         }
 
-        self.cur += 2 + size as usize;
-        Some(&self.buf[self.cur + 2 .. self.cur + 2 + size as usize])
+        let data_offset = self.cur + 2;
+        // Update cursor of iterator.
+        self.cur = data_offset + size as usize;
+        Some(&self.buf[data_offset .. data_offset + size as usize])
     }
 }
 
@@ -104,14 +113,14 @@ pub struct LogReader {
 
 impl LogReader {
     // Return None if no valid log file found.
-    pub fn new(dir_path: &str) -> Result<LogReader> {
+    pub fn new(dir_path: &Path) -> Result<LogReader> {
         // Prepare the buffer of 4MB.
-        let mut buf = Vec::with_capacity(LOG_MAX_SIZE.try_into()?);
+        let mut buf = Vec::with_capacity(LOG_FILE_MAX_SIZE.try_into()?);
 
         // Check whether size is 4MB.
         let log_path = Path::new(dir_path).join(LOG_FILENAME);
         let mut file = File::open(log_path)?;
-        if file.metadata()?.len() > LOG_MAX_SIZE {
+        if file.metadata()?.len() > LOG_FILE_MAX_SIZE {
             bail!("The size of log file is larger than defined");
         }
 
@@ -136,31 +145,21 @@ mod tests {
     use std::fs;
 
     use crate::log::*;
+    use crate::test_util::*;
 
-    use chrono::Utc;
     use anyhow::{Result, ensure};
-    use rand::Rng;
-
-    fn get_random_bytes() -> Vec<u8> {
-        let mut rng = rand::thread_rng();
-        let length = rng.gen_range(1..PAYLOAD_MAX_SIZE);
-        let mut data: Vec<u8> = Vec::with_capacity(length);
-        rng.fill(&mut data[..]);
-        data
-    }
 
     // Log will create a new log file in an empty log dir.
     #[test]
     fn write_empty_read() -> Result<()> {
         // Set up an empty test dir.
-        let test_dir_path = Utc::now().to_rfc3339() + "-qikv-test";
-        fs::create_dir_all(&test_dir_path)?;
+        let test_dir_path = create_test_dir()?;
 
         // Init log and write data.
         let mut writer = LogWriter::new(&test_dir_path)?;
         let mut data: Vec<u8> = Vec::new();
         for _ in 0..100 {
-            let payload = get_random_bytes();
+            let payload = get_random_bytes(1, usize::pow(2, 16));
             data.extend(&payload);
             writer.write(&payload)?;
         }

@@ -20,6 +20,7 @@
         devShell = mkShell {
           buildInputs = [
             rust-bin.nightly.latest.default
+            lldb
           ];
 
           # shellHook = ''
