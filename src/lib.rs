@@ -1,6 +1,11 @@
+#![feature(iter_array_chunks)]
+#![feature(map_first_last)]
+#![feature(iter_order_by)]
+
 pub mod log;
 pub mod memtable;
 pub mod sstable;
+pub mod manifest;
 pub mod db;
 
 

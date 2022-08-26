@@ -137,8 +137,46 @@ What does in-memory sstable do?
 	Get()
 	::Compaction(SStables)
 
+What happens when we point access a pair?
+	Test bloom filter.
+	Search memtables.
+	Search SStables from level 0 to higher.
+		Lookup manifest to find out which SStables are in serving state.
+		Check their key ranges from lower level to higher.
+		Scan SStables.
+	It should be a consistent view.
+
 How to scan over memtable, SStables?
 	Use iterator like LevelDB.
+		Get all iterator.
+		Generate the smallest one each time like in compaction.
 	And remember that sstables in the same level are not overlapping except for level 0.
+
+What's the format of manifest?
+
+What's the detailed process of compaction?
+	Flush memtable to level 0 SStables.
+	When there are four level 0 SStables, compact all of them to produce level 1 SStables.(Use a new file every 2MB)
+	Continuing to flush memtable to level 0 SStables.
+	When there are four level 0 SStables, compact all of them and overlapping level 1 SStables.
+	If combined size of level L(>=1) SStables > 10^L MB, choose a SStables (rotate the chosed range over key space) and its overlapping SStables in level L+1 to compact.
+
+How to compact async if it's flushing memtable triggering all this?
+	When it's time to flush a memtable, just add it to a to-be-compacted list. The compaction thread will process it.
+	New another memtable to store in-coming data.
+
+
+How sparse the SStable index should be?
+	Every 16 pair. Maybe.
+
+If we use bincode to serialize memtable to disk, we cannot get the sparse index since offsets are unknown.
+Try partitioning memtable?
+
+
+sstables is like log. So I should use reader/writer pattern?
+OO or functional?
+
+How to organize modules?
+	Manifest depends on SStables or vice versa.
 
 

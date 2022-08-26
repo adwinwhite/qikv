@@ -6,19 +6,20 @@
 //
 //
 use std::path::Path;
+use std::ops::{Deref, DerefMut};
 
 use crate::log::LogReader;
 
 use skiplist::SkipMap;
 use anyhow::Result;
-use serde::{Serialize, Deserialize};
-use bincode;
+use bincode::{config, Decode, Encode};
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Encode, Decode, PartialEq, Eq, Debug, Clone)]
 pub enum ValueUpdate {
     Tombstone,
     Value(Vec<u8>),
 }
+
 
 
 #[derive(PartialEq, Eq)]
@@ -26,16 +27,34 @@ pub struct MemTable {
     container: SkipMap<Vec<u8>, ValueUpdate>,
 }
 
+impl Deref for MemTable {
+    type Target = SkipMap<Vec<u8>, ValueUpdate>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.container
+    }
+}
+
+impl DerefMut for MemTable {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.container
+    }
+}
+
+// Probably we don't need a seperate MemTable struct 
+// since there is no additional attributes.
+// Just use SkipMap.
 impl MemTable {
     // Generate memtable from log or just new one.
     // Use a new empty table if anything unexpected happens.
     // Though it can lead to data missing.
     pub fn new(dir_path: &Path) -> Result<MemTable> {
         let mut table = SkipMap::new();
+        let config = bincode::config::standard();
         match LogReader::new(dir_path) {
             Ok(reader) => {
                 for entry in reader.iter() {
-                    let (key, update): (Vec<u8>, ValueUpdate) = bincode::deserialize(&entry[..])?;
+                    let (key, update): (Vec<u8>, ValueUpdate) = bincode::decode_from_slice(&entry[..], config)?.0;
                     table.insert(key, update);
                 }
                 Ok(MemTable { container: table, })
@@ -52,15 +71,21 @@ impl MemTable {
         }
     }
 
+    pub fn new_empty() -> MemTable {
+        MemTable {
+            container: SkipMap::new(),
+        }
+    }
+
     // pub fn from_log() {}
 
-    pub fn insert(&mut self, key: Vec<u8>, update: ValueUpdate) -> Option<ValueUpdate> {
-        self.container.insert(key, update)
-    }
+    // pub fn insert(&mut self, key: Vec<u8>, update: ValueUpdate) -> Option<ValueUpdate> {
+        // (*self).insert(key, update)
+    // }
 
-    pub fn get(&self, key: &[u8]) -> Option<&ValueUpdate> {
-        self.container.get(key)
-    }
+    // pub fn get(&self, key: &[u8]) -> Option<&ValueUpdate> {
+        // (*self).container.get(key)
+    // }
 }
 
 #[cfg(test)]
@@ -84,6 +109,7 @@ mod tests {
         let test_dir_path = create_test_dir()?;
         let mut log_writer = LogWriter::new(&test_dir_path)?;
         let mut table = MemTable::new(&test_dir_path)?;
+        let config = bincode::config::standard();
 
         for _ in 0..1024 {
             let key = get_random_bytes(1, 10);
@@ -92,7 +118,7 @@ mod tests {
             } else {
                 ValueUpdate::Value(get_random_bytes(1, usize::pow(2, 10)))
             };
-            let payload = bincode::serialize(&(&key, &update))?;
+            let payload = bincode::encode_to_vec(&(&key, &update), config)?;
             ensure!(payload.len() < PAYLOAD_MAX_SIZE as usize, "Payload is larger than what log allows");
             log_writer.write(&payload)?;
             table.insert(key, update);
