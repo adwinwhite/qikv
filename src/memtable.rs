@@ -93,7 +93,7 @@ mod tests {
     
 
     use crate::test_util::*;
-    use crate::log::{LogWriter, LOG_FILE_MAX_SIZE, PAYLOAD_MAX_SIZE};
+    use crate::log::{LogWriter, LOG_FILE_MAX_SIZE};
     use crate::memtable::{ValueUpdate, MemTable};
     
 
@@ -119,7 +119,6 @@ mod tests {
                 ValueUpdate::Value(get_random_bytes(1, usize::pow(2, 10)))
             };
             let payload = bincode::encode_to_vec(&(&key, &update), config)?;
-            ensure!(payload.len() < PAYLOAD_MAX_SIZE as usize, "Payload is larger than what log allows");
             log_writer.write(&payload)?;
             table.insert(key, update);
         }

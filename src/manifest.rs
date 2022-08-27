@@ -70,10 +70,10 @@ impl Manifest {
     // pub fn new_from_log() -> Manifest {}
 
     pub fn new_sst_id(&mut self, level: u64) -> SstId {
-        let id = *self.new_ids.entry(level).or_insert(0) + 1;
+        let id = self.new_ids.entry(level).and_modify(|i| { *i += 1 }).or_insert(0);
         SstId {
             level,
-            id,
+            id: *id,
         }
     }
 }

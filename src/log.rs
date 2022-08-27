@@ -31,10 +31,10 @@ use std::path::Path;
 use std::vec::Vec;
 
 use anyhow::{Result, bail};
+use bincode::config;
 
 pub const LOG_FILENAME: &str = "RECOVERY_LOG";
 pub const LOG_FILE_MAX_SIZE: u64 = 4 * u64::pow(2, 20);
-pub const PAYLOAD_MAX_SIZE: usize = usize::pow(2, 16);
 
 pub struct LogWriter {
     file: File,
@@ -54,17 +54,9 @@ impl LogWriter {
 
     // Write paylaod to current log file.
     pub fn write(&mut self, payload: &[u8]) -> Result<()> {
-        let total_length = payload.len() + 2;
-        let mut data = Vec::with_capacity(total_length);
-        data.extend(u16::try_from(payload.len())?.to_be_bytes());
-        data.extend(payload);
-        let size_written = self.file.write(&data)?;
+        bincode::encode_into_std_write(&payload, &mut self.file, config::standard())?;
         self.file.flush()?;
-        if size_written == total_length {
-            Ok(())
-        } else {
-            bail!("Size of data written is incorrect");
-        }
+        Ok(())
     }
 
     pub fn len(&self) -> Result<u64> {
@@ -86,24 +78,18 @@ impl<'a> Iterator for LogIter<'a> {
     // Done if size is 0.
     // Assume data is not corrupted.
     fn next(&mut self) -> Option<Self::Item> {
-        if self.cur + 2 > self.buf.len() {
+        if self.cur >= self.buf.len() {
             self.done = true;
         }
         if self.done {
             return None;
         }
-        // Read size of next payload.
-        let size = u16::from_be_bytes(self.buf[self.cur..self.cur + 2].try_into().ok()?);
 
-        if size == 0 {
-            self.done = true;
-            return None;
-        }
-
-        let data_offset = self.cur + 2;
-        // Update cursor of iterator.
-        self.cur = data_offset + size as usize;
-        Some(&self.buf[data_offset .. data_offset + size as usize])
+        let (payload, size): (Self::Item, usize) =
+            bincode::decode_from_slice(&self.buf[self.cur..], config::standard())
+                .expect("Failed to decode log payload");
+        self.cur += size;
+        Some(payload)
     }
 }
 

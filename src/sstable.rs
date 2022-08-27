@@ -26,7 +26,7 @@ pub const SSTABLE_FILE_SIZE: u64 = u64::pow(2, 21);
 
 pub type SparseIndex = BTreeMap<Vec<u8>, usize>;
 
-#[derive(PartialEq, Eq, Copy, Clone)]
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
 pub struct SstId {
     pub level: u64,
     pub id: u64,
@@ -59,9 +59,23 @@ impl SstId {
 }
 
 // In-memory SSTable used for query and compaction.
+#[derive(PartialEq, Eq, Clone)]
 pub struct SSTable {
     buf: Vec<u8>,       // Store records only.
     index: SparseIndex, // Sparse index: key -> offset
+    id: SstId,          // Used for sorting.
+}
+
+impl Ord for SSTable {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+
+impl PartialOrd for SSTable {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl SSTable {
@@ -91,15 +105,17 @@ impl SSTable {
         Ok(SSTable {
             buf: record_buf,
             index,
+            id: *sst_id,
         })
     }
 
-    pub fn iter_combined(sstables: &[SSTable]) -> CombinedIter {
+    pub fn iter_combined(sstables: &[SSTable]) -> Result<CombinedIter> {
         // Sort sst_ids by create time.
-        CombinedIter {
+        ensure!(sstables.is_sorted(), "Input sstables are not sorted in iter_combined()");
+        Ok(CombinedIter {
             iter_list: sstables.iter().map(|s| s.iter().peekable()).collect(),
             previous_key: Vec::new(),
-        }
+        })
         
     }
     // TODO: use a new file every 2MB.
@@ -116,19 +132,32 @@ impl SSTable {
 
         let mut index = SparseIndex::new();
 
-        let mut count = 0;
+        let mut num_count = 0;
         let mut offset = 0;
         let mut sst_ids = sst_ids.to_vec();
         sst_ids.sort();
         let sstables: Result<Vec<_>> = sst_ids.iter().map(|id| Self::load_by_id(&id, db_dir)).collect();
 
-        for (k, v) in Self::iter_combined(&sstables?[..]) {
+        for (k, v) in Self::iter_combined(&sstables?[..])? {
             let encoded = bincode::encode_to_vec((&k, &v), config::standard())?;
+            // Check whether we should write to a new sstable file.
+            if offset + encoded.len() > SSTABLE_FILE_SIZE as usize {
+                // Write sparse index.
+                let encoded = bincode::encode_to_vec(&index, config::standard())?;
+                file.write(&encoded)?;
+                file.write(&u64::to_be_bytes(encoded.len() as u64))?;
+                // Create a new sstable file.
+                // Reset per file variables.
+                file = manifest.new_sst_id(dest_level).create_file(db_dir)?;
+                index = SparseIndex::new();
+                num_count = 0;
+                offset = 0;
+            }
             file.write(&encoded)?;
-            if count % SPARSE_INDEX_INTERVAL == 0 {
+            if num_count % SPARSE_INDEX_INTERVAL == 0 {
                 index.insert(k.clone(), offset);
             }
-            count += 1;
+            num_count += 1;
             offset += encoded.len();
         }
 
@@ -378,7 +407,7 @@ mod tests {
 
         let combined_iter = SSTable::iter_combined(&sstables[..]);
         ensure!(whole.len() != 0, "The whole memtable is empty");
-        if !combined_iter
+        if !combined_iter?
             .eq_by(whole.iter(), |(sk, sv), (mk, mv)| &sk == mk && &sv == mv)
         {
             bail!("Combined iterator produces different values from the complete memtable");
@@ -429,7 +458,7 @@ mod tests {
         }
         let combined_iter = SSTable::iter_combined(&sstables);
 
-        if !old_combined_iter.eq(combined_iter) {
+        if !old_combined_iter?.eq(combined_iter?) {
             bail!("SSTables files not equal after compaction");
         }
 

@@ -1,6 +1,7 @@
 #![feature(iter_array_chunks)]
 #![feature(map_first_last)]
 #![feature(iter_order_by)]
+#![feature(is_sorted)]
 
 pub mod log;
 pub mod memtable;
