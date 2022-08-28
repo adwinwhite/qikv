@@ -9,6 +9,40 @@ pub mod sstable;
 pub mod manifest;
 pub mod db;
 
+// Use custom encoding so that iterator over sstable can return references.
+// pub mod encode {
+    // // format := [ varstring | delete flag | [ varstring] ]
+    // // varstring := [ len as u64 | payload ]
+
+    // use std::mem;
+    // use crate::memtable::ValueUpdate;
+
+    // pub type PayloadSize = u32;
+
+    // pub fn encode((key, update): (&Vec<u8>, &ValueUpdate)) -> Vec<u8> {
+        // match update {
+            // ValueUpdate::Value(v) => {
+                // let mut encoded = Vec::with_capacity(mem::size_of::<PayloadSize>() + key.len() + 1 + mem::size_of::<PayloadSize>() + v.len());
+                // encoded.extend_from_slice(&(key.len() as PayloadSize).to_le_bytes());
+                // encoded.extend_from_slice(&key);
+                // encoded.push(0);
+                // encoded.extend_from_slice(&(v.len() as PayloadSize).to_le_bytes());
+                // encoded.extend_from_slice(&v);
+                // encoded
+            // },
+            // ValueUpdate::Tombstone => {
+                // let mut encoded = Vec::with_capacity(mem::size_of::<PayloadSize>() + key.len() + 1);
+                // encoded.extend_from_slice(&(key.len() as PayloadSize).to_le_bytes());
+                // encoded.extend_from_slice(&key);
+                // encoded.push(1);
+                // encoded
+            // }
+        // }
+    // }
+
+    // pub fn decode(data: &[u8]) -> (&[u8],
+// }
+
 
 
 #[cfg(test)]

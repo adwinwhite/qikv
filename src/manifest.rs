@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 // use std::path::Path;
 // use std::fs;
 // use std::fs::File;
@@ -14,7 +14,7 @@ use crate::sstable::*;
 #[derive(Clone)]
 pub struct Manifest {
     new_ids: BTreeMap<u64, u64>, // largest ids for each level.
-    active_ssts: BTreeMap<u64, HashSet<u64>>,
+    active_ssts: BTreeMap<u64, BTreeSet<u64>>,
     sst_ranges: BTreeMap<SstId, (Vec<u8>, Vec<u8>)>,
 }
 
@@ -36,12 +36,12 @@ impl Manifest {
     // pub fn get_sst_by_key(key: &[u8]) -> &[SstId] { }
 
     pub fn add_sst(&mut self, sst_id: SstId, first_key: &[u8], last_key: &[u8]) {
-        self.active_ssts.entry(sst_id.level).or_insert(HashSet::new()).insert(sst_id.id);
+        self.active_ssts.entry(sst_id.level).or_insert(BTreeSet::new()).insert(sst_id.id);
         self.sst_ranges.insert(sst_id, (first_key.to_vec(), last_key.to_vec()));
     }
 
     pub fn remove_sst(&mut self, sst_id: &SstId) {
-        self.active_ssts.entry(sst_id.level).or_insert(HashSet::new()).remove(&sst_id.id);
+        self.active_ssts.entry(sst_id.level).or_insert(BTreeSet::new()).remove(&sst_id.id);
         self.sst_ranges.remove(&sst_id);
     }
 
@@ -51,6 +51,16 @@ impl Manifest {
             ids.append(&mut v.iter().map(|id| SstId { level: *k, id: *id, }).collect::<Vec<SstId>>());
         }
         ids
+    }
+
+    pub fn get_sst_by_key(&self, key: &[u8]) -> Option<SstId> {
+        for id in self.active_sst_ids() {
+            let (start, end) = self.sst_ranges.get(&id).unwrap();
+            if key >= start && key <= end {
+                return Some(id);
+            }
+        }
+        None
     }
 
     pub fn get_overlappings(&self, level: u64, key_start: &[u8], key_end: &[u8]) -> Vec<SstId> {

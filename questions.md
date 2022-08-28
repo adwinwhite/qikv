@@ -179,4 +179,32 @@ OO or functional?
 How to organize modules?
 	Manifest depends on SStables or vice versa.
 
+I don't understand lifetimes in Rust at all!
+	I got it.
+	Lifetime is a period in that owned value doesn't change its memory location(aka not moved or dropped).
+	<'a> means there must exist some lifetime "a"
+	In a function, input references annotated with "a" must be all valid in "a", and output references annotated with "a" are only valid in "a".
+	For struct, it's the same. Just think in terms of its constructor and the constructed instance as the output reference.
+
+Should I seperate sparse index from actual data?
+
+I should make a more general combined iterator that can combine iterators from memtable and so on. 
+	Use trait object.
+
+Todo!
+	Improve Iterator so that it can return references or what.
+		Use custom encoding.
+			Type mismatch.
+	Or easy construction.
+		Create an owned type to hold sstables.
+			Then where to place it?
+		Let's creata a sst manager to own all active sstables.
+			And a sst cheap handle?
+	Lazy load of a level to use only one iterator.
+	Iterator over whole db.
+	Well consider lazy load later:
+		SSTable lazy load.
+		Lazy get().
+		Lazy compaction? (Seems not necessary)
+
 
