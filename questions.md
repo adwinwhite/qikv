@@ -183,7 +183,7 @@ I don't understand lifetimes in Rust at all!
 	I got it.
 	Lifetime is a period in that owned value doesn't change its memory location(aka not moved or dropped).
 	<'a> means there must exist some lifetime "a"
-	In a function, input references annotated with "a" must be all valid in "a", and output references annotated with "a" are only valid in "a".
+	In a function, all input references annotated with "a" must be valid in "a", and output references annotated with "a" are only valid in "a".
 	For struct, it's the same. Just think in terms of its constructor and the constructed instance as the output reference.
 
 Should I seperate sparse index from actual data?
@@ -191,10 +191,25 @@ Should I seperate sparse index from actual data?
 I should make a more general combined iterator that can combine iterators from memtable and so on. 
 	Use trait object.
 
+What about error handling? Fail to load SST file?
+	Panic bravely? 
+	Only panic in main()?
+
+Why doesn't level 1 sst file exist?
+	Check whether it's created first.
+	Read the wrong path.
+
+How to check memtable's size without counting every insertion?
+
+How to purge useless Tombstones?
+
 Todo!
+	Check levelDB and RocksDB's in-memory SSTable.
 	Improve Iterator so that it can return references or what.
 		Use custom encoding.
 			Type mismatch.
+				Which with which?
+		Zero-copy serde/deserde.
 	Or easy construction.
 		Create an owned type to hold sstables.
 			Then where to place it?

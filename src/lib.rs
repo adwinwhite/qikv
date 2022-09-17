@@ -7,7 +7,7 @@ pub mod log;
 pub mod memtable;
 pub mod sstable;
 pub mod manifest;
-pub mod db;
+pub mod store;
 
 // Use custom encoding so that iterator over sstable can return references.
 // pub mod encode {

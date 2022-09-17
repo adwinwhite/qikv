@@ -63,7 +63,7 @@ impl SstId {
 // In-memory SSTable used for query and compaction.
 #[derive(PartialEq, Eq, Clone)]
 pub struct SSTable {
-    buf: Vec<u8>,       // Store records only.
+    buf: Vec<u8>,       // Store kv pairs only.
     index: SparseIndex, // Sparse index: key -> offset
     id: SstId,          // Used for sorting.
 }
@@ -327,6 +327,9 @@ impl<'a> Iterator for SSTableIter<'a> {
     }
 }
 
+// Owner of a group of sstables.
+// When iterating, order of sstables is priority.
+// The smaller the higher.
 pub struct SSTGroup {
     sstables: Vec<SSTable>,
 }
@@ -340,11 +343,89 @@ impl SSTGroup {
         })
     }
 
+    // Return the first found value which is also the latest value.
+    pub fn get(&self, key: &[u8]) -> Option<ValueUpdate> {
+        for s in &self.sstables {
+            if let Some(update) = s.get(key) {
+                return Some(update);
+            }
+        }
+        None
+    }
+
     pub fn iter(&self) -> SSTGroupIter {
         SSTGroupIter {
             iter_list: self.sstables.iter().map(|s| s.iter().peekable()).collect(),
             previous_key: Vec::new(),
         }
+    }
+
+    pub fn compact(&mut self, dest_level: u64, db_dir: &Path, manifest: &mut Manifest) -> Result<()> {
+        //  Requires: SSTables are ordered by timestamp. Younger ones are at the beginning.
+        //
+        // Open all iterators.
+        // Compare with last key, ignore duplicate.
+        // Produce a single minimum key (young key preferred)
+        // Collect current items and filter out None.
+        //
+        // Prepare the dest file.
+        let mut sst_id = manifest.new_sst_id(dest_level);
+        let mut file = sst_id.create_file(db_dir)?;
+
+        let mut index = SparseIndex::new();
+
+        let mut num_count = 0;
+        let mut offset = 0;
+        let mut previous_size = 0;
+        let mut previous_key = Vec::new();
+
+        for (k, v) in SSTable::iter_combined(&self.sstables[..])? {
+            let encoded = bincode::encode_to_vec((&k, &v), config::standard())?;
+            // Check whether we should write to a new sstable file.
+            if offset + encoded.len() > SSTABLE_FILE_SIZE as usize {
+                // Write sparse index.
+                index.insert(previous_key, offset - previous_size);
+                let encoded = bincode::encode_to_vec(&index, config::standard())?;
+                file.write(&encoded)?;
+                file.write(&u64::to_be_bytes(encoded.len() as u64))?;
+                file.sync_all()?;
+                // Add it to manifest.
+                manifest.add_sst(sst_id, index.first_key_value().unwrap().0, index.last_key_value().unwrap().0);
+                //
+                // Create a new sstable file.
+                // Reset per file variables.
+                sst_id = manifest.new_sst_id(dest_level);
+                file = sst_id.create_file(db_dir)?;
+                index = SparseIndex::new();
+                num_count = 0;
+                offset = 0;
+            }
+            file.write(&encoded)?;
+            if num_count % SPARSE_INDEX_INTERVAL == 0 {
+                index.insert(k.clone(), offset);
+            }
+            num_count += 1;
+            offset += encoded.len();
+            previous_size = encoded.len();
+            previous_key = k.clone();
+        }
+
+        // Add the last key to index.
+        index.insert(previous_key, offset - previous_size);
+
+        // Write sparse index.
+        let encoded = bincode::encode_to_vec(&index, config::standard())?;
+        file.write(&encoded)?;
+        file.write(&u64::to_be_bytes(encoded.len() as u64))?;
+        file.sync_all()?;
+        // Add it to manifest.
+        manifest.add_sst(sst_id, index.first_key_value().unwrap().0, index.last_key_value().unwrap().0);
+
+        // Remove obsolete sst files.
+        for sst in &self.sstables {
+            manifest.remove_sst(&sst.id);
+        }
+        Ok(())
     }
 
 }
@@ -550,7 +631,7 @@ mod tests {
     use rand::Rng;
 
     fn new_random_memtable() -> MemTable {
-        let mut memtable = MemTable::new_empty();
+        let mut memtable = MemTable::new();
         // 512
         for _ in 0..512 {
             // 10
@@ -606,7 +687,7 @@ mod tests {
     #[test]
     fn test_combined_iterator() -> Result<()> {
         // Create a whole memtable and several partitioned memtables to produce sstables.
-        let mut whole = MemTable::new_empty();
+        let mut whole = MemTable::new();
 
         let test_dir_path = create_test_dir()?;
         for i in 0..16 {
