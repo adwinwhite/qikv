@@ -1,5 +1,6 @@
 // For simplcity, we flush memtable if it contains more than certain number of items.
 use std::path::{Path, PathBuf};
+use std::fs;
 use crate::memtable::*;
 use crate::manifest::*;
 use crate::sstable::*;
@@ -11,19 +12,25 @@ use skiplist::skipmap;
 
 pub struct Store {
     memtable: MemTable,
-    manifest: Manifest,
+    manifest: ManifestKeeper,
     bloom: GrowableBloom,
     dir: PathBuf,
 }
 
 impl Store {
-    pub fn new(store_dir: &Path) -> Store {
-        Store {
+    pub fn new(store_dir: &Path) -> Result<Store> {
+        fs::create_dir_all(store_dir)?;
+        Ok(Store {
             memtable: MemTable::new(),
-            manifest: Manifest::new(),
+            manifest: ManifestKeeper::new(store_dir)?,
             bloom: GrowableBloom::new(0.05, 4096),
             dir: store_dir.to_path_buf(),
-        }
+        })
+    }
+
+    pub fn recover(store_dir: &Path) -> Result<Store> {
+        todo!()
+        
     }
 
     pub fn workdir(&self) -> PathBuf {
@@ -71,9 +78,9 @@ impl Store {
     fn checked_flush(&mut self) -> Result<bool> {
         // Check whether to flush to level 0 sstable.
         if self.memtable.should_flush() {
-            let sst_id = self.manifest.new_sst_id(0);
+            let sst_id = self.manifest.new_id(0)?;
             SSTable::flush_to_level0(&self.memtable, &self.dir, sst_id.id)?;
-            self.manifest.add_sst(sst_id, self.memtable.front().unwrap().0, self.memtable.back().unwrap().0);
+            self.manifest.add(sst_id, self.memtable.front().unwrap().0, self.memtable.back().unwrap().0)?;
             self.memtable.clear();
             self.try_compact()?;
             Ok(true)
@@ -108,7 +115,7 @@ impl Store {
                 }
             } else {
                 if self.manifest.level_byte_size(level, &self.dir)? > u64::pow(10, level as u32) * u64::pow(2, 20) {
-                    let rotate_sst = self.manifest.next_compact_sst(level).unwrap(); // level is smaller than max_level.
+                    let rotate_sst = self.manifest.next_compact(level)?.unwrap(); // level is smaller than max_level.
                     let mut overlappings = Vec::new();
                     overlappings.extend(self.manifest.get_overlappings(&rotate_sst));
                     overlappings.push(rotate_sst);
@@ -196,7 +203,7 @@ mod tests {
     fn test_complete() -> Result<()> {
         // Write large amount of data and then read and compare.
         let test_store_dir = create_test_dir()?;
-        let mut store = Store::new(&test_store_dir);
+        let mut store = Store::new(&test_store_dir)?;
         let mut good_map = BTreeMap::new();
         for _ in 0..4096 {
             let key = get_random_bytes(1, 4);
@@ -246,7 +253,7 @@ mod tests {
         // Until it reach certain amount/level. 4MB + 10MB.
         // Check sst file sizes 
         let test_store_dir = create_test_dir()?;
-        let mut store = Store::new(&test_store_dir);
+        let mut store = Store::new(&test_store_dir)?;
         for _ in 0..usize::pow(2, 14) {
             let key = get_random_bytes(512, 513);
             if rand::thread_rng().gen::<f64>() > 0.2 {

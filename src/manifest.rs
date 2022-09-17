@@ -1,17 +1,178 @@
+// MANIFEST_CURRENT format :=
+//  snapshot_filename
+//  \n
+//  log_filename
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-// use std::fs;
-// use std::fs::File;
-// use std::io::{Read, Write};
+use std::ops::{Deref, DerefMut};
+use std::fs;
+use std::fs::File;
+use std::io::{Read, Write};
 
 use crate::sstable::*;
 // use crate::memtable::MemTable;
 
 use anyhow::Result;
-// use bincode::config;
+use bincode::{Decode, Encode};
+//
+const MANIFEST_CURRENT: &str = "MANIFEST_CURRENT";
+const MANIFEST_SNAPSHOT_PREFIX: &str = "MANIFEST_SNAPSHOT";
+const MANIFEST_LOG_PREFIX: &str = "MANIFEST_LOG";
+
+pub struct ManifestKeeper {
+    manifest: Manifest,
+    log: File,
+}
+
+impl Deref for ManifestKeeper {
+    type Target = Manifest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.manifest
+    }
+}
+
+impl DerefMut for ManifestKeeper {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.manifest
+    }
+}
+
+#[derive(Encode, Decode, Debug)]
+enum ManifestAction {
+    Add,
+    Remove,
+    NewId,
+    NextCompact,
+}
 
 
-#[derive(Clone)]
+impl ManifestKeeper {
+    pub fn new(store_dir: &Path) -> Result<ManifestKeeper> {
+        let mut current = File::options().write(true).create_new(true).open(store_dir.join(MANIFEST_CURRENT))?;
+        current.write((MANIFEST_SNAPSHOT_PREFIX.to_owned() + "_0" 
+            + "\n" 
+            + MANIFEST_LOG_PREFIX + "_0").as_bytes())?;
+        drop(current);
+        let snapshot_file = File::options().write(true).create(true).open(store_dir.join(MANIFEST_SNAPSHOT_PREFIX.to_owned() + "_0"))?;
+        snapshot_file.sync_all()?;
+        drop(snapshot_file);
+        let log_file = File::options().append(true).create(true).open(store_dir.join(MANIFEST_LOG_PREFIX.to_owned() + "_0"))?;
+        let mut keeper = ManifestKeeper {
+            manifest: Manifest::new(),
+            log: log_file,
+        };
+        keeper.snapshot(store_dir)?;
+        Ok(keeper)
+    }
+
+    pub fn snapshot(&mut self, store_dir: &Path) -> Result<()> {
+        // Create a new file to store snapshot.
+        // Create a new empty log file.
+        // Point to new snapshot and log file.
+        // Delete obsolete snapshot and log.
+        let mut current = File::options().read(true).write(true).open(store_dir.join(MANIFEST_CURRENT))?;
+        let mut content = String::new();
+        current.read_to_string(&mut content)?;
+        let names: Vec<_> = content.split_whitespace().collect();
+        let snapshot_num = names[0][MANIFEST_SNAPSHOT_PREFIX.len() + 1 ..].parse::<u64>()?;
+        let log_num = names[1][MANIFEST_LOG_PREFIX.len() + 1 ..].parse::<u64>()?;
+        let mut snapshot_file = File::options().write(true).create(true).truncate(true).open(store_dir.join(MANIFEST_SNAPSHOT_PREFIX.to_owned() + "_" + &(snapshot_num + 1).to_string()))?;
+        let log_file = File::options().write(true).create(true).truncate(true).open(store_dir.join(MANIFEST_LOG_PREFIX.to_owned() + "_" + &(log_num + 1).to_string()))?;
+
+        bincode::encode_into_std_write(&self.manifest, &mut snapshot_file, bincode::config::standard())?;
+        snapshot_file.sync_all()?;
+        log_file.sync_all()?;
+
+        current.set_len(0)?;
+        current.write((MANIFEST_SNAPSHOT_PREFIX.to_owned() + "_" + &snapshot_num.to_string() 
+            + "\n" 
+            + MANIFEST_LOG_PREFIX + "_" + &log_num.to_string()).as_bytes())?;
+        current.sync_all()?;
+
+        self.log = log_file;
+
+        fs::remove_file(store_dir.join(names[0]))?;
+        fs::remove_file(store_dir.join(names[1]))?;
+
+        Ok(())
+    }
+
+    pub fn recover(store_dir: &Path) -> Result<ManifestKeeper> {
+        // Load snapshot and then replay log.
+        let mut current = File::options().read(true).write(true).open(store_dir.join(MANIFEST_CURRENT))?;
+        let mut content = String::new();
+        current.read_to_string(&mut content)?;
+        let names: Vec<_> = content.split_whitespace().collect();
+        let mut snapshot_file = File::open(store_dir.join(names[0]))?;
+        let mut manifest: Manifest = bincode::decode_from_std_read(&mut snapshot_file, bincode::config::standard())?;
+        let mut log_file = File::options().read(true).write(true).open(store_dir.join(names[1]))?;
+
+        let mut buf = Vec::new();
+        log_file.read_to_end(&mut buf)?; // Now seek to end.
+
+        let mut cur = 0;
+        while cur < buf.len() {
+            let (action, size): (ManifestAction, usize) = bincode::decode_from_slice(&buf[cur..], bincode::config::standard())?;
+            cur += size;
+            match action {
+                ManifestAction::NextCompact => {
+                    let ((level, ), size): ((u64, ), usize) = bincode::decode_from_slice(&buf[cur..], bincode::config::standard())?;
+                    cur += size;
+                    manifest.next_compact_sst(level);
+                },
+                ManifestAction::Add => {
+                    let ((sst_id, first_key, last_key,), size): ((SstId, Vec<u8>, Vec<u8>,), usize) = bincode::decode_from_slice(&buf[cur..], bincode::config::standard())?;
+                    cur += size;
+                    manifest.add_sst(sst_id, &first_key, &last_key);
+                },
+                ManifestAction::Remove => {
+                    let ((sst_id, ), size): ((SstId, ), usize) = bincode::decode_from_slice(&buf[cur..], bincode::config::standard())?;
+                    cur += size;
+                    manifest.remove_sst(&sst_id);
+                },
+                ManifestAction::NewId => {
+                    let ((level, ), size): ((u64, ), usize) = bincode::decode_from_slice(&buf[cur..], bincode::config::standard())?;
+                    cur += size;
+                    manifest.new_sst_id(level);
+                }
+            }
+        }
+
+        Ok(ManifestKeeper {
+            manifest,
+            log: log_file,
+        })
+    }
+
+    pub fn next_compact(&mut self, level: u64) -> Result<Option<SstId>> {
+        bincode::encode_into_std_write(ManifestAction::NextCompact, &mut self.log, bincode::config::standard())?;
+        bincode::encode_into_std_write((level,), &mut self.log, bincode::config::standard())?;
+        Ok(self.next_compact_sst(level))
+    }
+
+    pub fn add(&mut self, sst_id: SstId, first_key: &[u8], last_key: &[u8]) -> Result<()> {
+        bincode::encode_into_std_write(ManifestAction::Add, &mut self.log, bincode::config::standard())?;
+        bincode::encode_into_std_write((sst_id, first_key, last_key,), &mut self.log, bincode::config::standard())?;
+        Ok(self.add_sst(sst_id, first_key, last_key))
+    }
+
+    pub fn remove(&mut self, sst_id: &SstId) -> Result<()> {
+        bincode::encode_into_std_write(ManifestAction::Remove, &mut self.log, bincode::config::standard())?;
+        bincode::encode_into_std_write((sst_id,), &mut self.log, bincode::config::standard())?;
+        Ok(self.remove_sst(sst_id))
+    }
+
+    pub fn new_id(&mut self, level: u64) -> Result<SstId> {
+        bincode::encode_into_std_write(ManifestAction::NewId, &mut self.log, bincode::config::standard())?;
+        bincode::encode_into_std_write((level,), &mut self.log, bincode::config::standard())?;
+        Ok(self.new_sst_id(level))
+    }
+
+}
+
+
+#[derive(Encode, Decode)]
 pub struct Manifest {
     new_ids: BTreeMap<u64, u64>, // largest ids for each level.
     compact_keys: BTreeMap<u64, Vec<u8>>, // next compact key in each level.
@@ -28,6 +189,7 @@ impl Manifest {
             sst_ranges: BTreeMap::new(),
         }
     }
+
     pub fn max_level(&self) -> u64 { 
         if let Some((&level, _)) = self.active_ssts.last_key_value() {
             level
@@ -161,22 +323,6 @@ impl Manifest {
         }
         overlappings
     }
-
-    // pub fn get_overlappings(&self, level: u64, key_start: &[u8], key_end: &[u8]) -> Vec<SstId> {
-        // let mut overlappings = Vec::new();
-        // if let Some(ids) = self.active_ssts.get(&level) {
-            // for id in ids {
-                // let sst_id = SstId { level, id: *id, };
-                // let (s1, e1) = self.sst_ranges.get(&sst_id).expect("The range should exist");
-                // if key_end >= s1 && key_start <= e1 {
-                    // overlappings.push(sst_id);
-                // }
-            // }
-        // }
-        // overlappings
-    // }
-
-    // pub fn new_from_log() -> Manifest {}
 
     pub fn new_sst_id(&mut self, level: u64) -> SstId {
         let id = self.new_ids.entry(level).and_modify(|i| { *i += 1 }).or_insert(0);

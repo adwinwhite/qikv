@@ -199,11 +199,34 @@ Why doesn't level 1 sst file exist?
 	Check whether it's created first.
 	Read the wrong path.
 
+How to recover from crash? Log replay + snapshot.
+	memtable from log.
+	manifest from another log.
+	bloomfilter?
+
+How to record operations?
+	Use newtype pattern to warp old structs?
+		requires new function name.
+		need to disable unrecorded function version.
+
+How to avoid half snapshot of manifest?
+	Only switch after the new snapshot is completely created.
+
+How to ensure atomicity of recording and operation?
+
+How to initialize from normal exit?
+	new empty memtable.
+	manfest from directories/files.
+
+What if bloomfilter grows too large?
+
 How to check memtable's size without counting every insertion?
 
 How to purge useless Tombstones?
 
 Todo!
+	Test manifest recovery.
+	Crash recovery.
 	Check levelDB and RocksDB's in-memory SSTable.
 	Improve Iterator so that it can return references or what.
 		Use custom encoding.

@@ -19,7 +19,7 @@ use crate::memtable::{MemTable, ValueUpdate};
 use crate::manifest::*;
 
 use anyhow::{ensure, anyhow, Result};
-use bincode::config;
+use bincode::{config, Encode, Decode};
 
 pub const SSTABLE_DIR: &str = "SST";
 pub const SPARSE_INDEX_INTERVAL: u64 = 16;
@@ -28,7 +28,7 @@ pub const SSTABLE_FILE_SIZE: u64 = u64::pow(2, 21);
 pub type SparseIndex = BTreeMap<Vec<u8>, usize>;
 pub type BoxedIter = Box<dyn Iterator<Item=(Vec<u8>, ValueUpdate)>>;
 
-#[derive(PartialEq, Eq, Copy, Clone, Debug)]
+#[derive(Encode, Decode, PartialEq, Eq, Copy, Clone, Debug)]
 pub struct SstId {
     pub level: u64,
     pub id: u64,
@@ -360,7 +360,7 @@ impl SSTGroup {
         }
     }
 
-    pub fn compact(&mut self, dest_level: u64, db_dir: &Path, manifest: &mut Manifest) -> Result<()> {
+    pub fn compact(&mut self, dest_level: u64, db_dir: &Path, manifest: &mut ManifestKeeper) -> Result<()> {
         //  Requires: SSTables are ordered by timestamp. Younger ones are at the beginning.
         //
         // Open all iterators.
@@ -369,7 +369,7 @@ impl SSTGroup {
         // Collect current items and filter out None.
         //
         // Prepare the dest file.
-        let mut sst_id = manifest.new_sst_id(dest_level);
+        let mut sst_id = manifest.new_id(dest_level)?;
         let mut file = sst_id.create_file(db_dir)?;
 
         let mut index = SparseIndex::new();
@@ -390,11 +390,11 @@ impl SSTGroup {
                 file.write(&u64::to_be_bytes(encoded.len() as u64))?;
                 file.sync_all()?;
                 // Add it to manifest.
-                manifest.add_sst(sst_id, index.first_key_value().unwrap().0, index.last_key_value().unwrap().0);
+                manifest.add(sst_id, index.first_key_value().unwrap().0, index.last_key_value().unwrap().0)?;
                 //
                 // Create a new sstable file.
                 // Reset per file variables.
-                sst_id = manifest.new_sst_id(dest_level);
+                sst_id = manifest.new_id(dest_level)?;
                 file = sst_id.create_file(db_dir)?;
                 index = SparseIndex::new();
                 num_count = 0;
@@ -419,11 +419,12 @@ impl SSTGroup {
         file.write(&u64::to_be_bytes(encoded.len() as u64))?;
         file.sync_all()?;
         // Add it to manifest.
-        manifest.add_sst(sst_id, index.first_key_value().unwrap().0, index.last_key_value().unwrap().0);
+        manifest.add(sst_id, index.first_key_value().unwrap().0, index.last_key_value().unwrap().0)?;
+
 
         // Remove obsolete sst files.
         for sst in &self.sstables {
-            manifest.remove_sst(&sst.id);
+            manifest.remove(&sst.id)?;
         }
         Ok(())
     }
@@ -743,12 +744,11 @@ mod tests {
         }
         sst_ids.sort();
         // Will change active sstables.
-        let old_manifest = manifest.clone();
+        let old_sst_ids = manifest.active_sst_ids();
         SSTable::compact(&sst_ids[..], 1, &test_dir_path, &mut manifest)?;
 
         // Load previous sstable files.
         let mut old_sstables = Vec::new();
-        let old_sst_ids = old_manifest.active_sst_ids();
         for id in old_sst_ids {
             let sstable = SSTable::load_by_id(&id, &test_dir_path)?;
             old_sstables.push(sstable);
