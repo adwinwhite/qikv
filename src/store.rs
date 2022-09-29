@@ -78,9 +78,7 @@ impl Store {
     fn checked_flush(&mut self) -> Result<bool> {
         // Check whether to flush to level 0 sstable.
         if self.memtable.should_flush() {
-            let sst_id = self.manifest.new_id(0)?;
-            SSTable::flush_to_level0(&self.memtable, &self.dir, sst_id.id)?;
-            self.manifest.add(sst_id, self.memtable.front().unwrap().0, self.memtable.back().unwrap().0)?;
+            SSTable::flush_to_level0(&self.memtable, &self.dir, &mut self.manifest)?;
             self.memtable.clear();
             self.try_compact()?;
             Ok(true)
@@ -105,6 +103,7 @@ impl Store {
         } else {
             if level == 0 {
                 if level_ids.len() >= 4 {
+                    self.manifest.batch_start();
                     let mut overlappings = Vec::new();
                     for id in &level_ids {
                         overlappings.extend(self.manifest.get_overlappings(id));
@@ -115,7 +114,9 @@ impl Store {
                 }
             } else {
                 if self.manifest.level_byte_size(level, &self.dir)? > u64::pow(10, level as u32) * u64::pow(2, 20) {
-                    let rotate_sst = self.manifest.next_compact(level)?.unwrap(); // level is smaller than max_level.
+                    self.manifest.batch_start();
+                    let rotate_sst = self.manifest.latest_compact_sst(level); // level is smaller than max_level.
+                    self.manifest.next_compact(level);
                     let mut overlappings = Vec::new();
                     overlappings.extend(self.manifest.get_overlappings(&rotate_sst));
                     overlappings.push(rotate_sst);
@@ -251,10 +252,11 @@ mod tests {
     fn check_sst_size() -> Result<()> {
         // Chunk write and delete
         // Until it reach certain amount/level. 4MB + 10MB.
-        // Check sst file sizes 
+        // Check sst file sizes
         let test_store_dir = create_test_dir()?;
         let mut store = Store::new(&test_store_dir)?;
-        for _ in 0..usize::pow(2, 14) {
+        // 16MB = 2^24 bit.
+        for _ in 0..usize::pow(2, 13) {
             let key = get_random_bytes(512, 513);
             if rand::thread_rng().gen::<f64>() > 0.2 {
                 let value = get_random_bytes(512, 513);
@@ -263,9 +265,11 @@ mod tests {
                 store.remove(&key)?;
             }
         }
+        dbg!(store.manifest.active_sst_ids());
         if dbg!(store.manifest.max_level()) != 2 {
             bail!(dbg!("Max level of SSTables is not correct"));
         }
         Ok(())
     }
+
 }

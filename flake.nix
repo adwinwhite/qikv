@@ -19,7 +19,7 @@
       {
         devShell = mkShell {
           buildInputs = [
-            rust-bin.nightly.latest.default
+            (rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
             lldb
           ];
 

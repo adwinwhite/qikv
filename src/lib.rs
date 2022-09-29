@@ -3,6 +3,8 @@
 #![feature(iter_order_by)]
 #![feature(is_sorted)]
 
+#![allow(unused_imports)]
+
 pub mod log;
 pub mod memtable;
 pub mod sstable;
@@ -54,6 +56,23 @@ pub mod test_util {
     use rand::Rng;
     use tempdir::TempDir;
 
+    pub fn get_random_key_range(start: usize, end: usize) -> (Vec<u8>, Vec<u8>) {
+        let mut rng = rand::thread_rng();
+
+        let length1 = rng.gen_range(start..end);
+        let mut data1: Vec<u8> = vec![0; length1];
+        rng.fill(&mut data1[..]);
+
+        let length2 = rng.gen_range(start..end);
+        let mut data2: Vec<u8> = vec![0; length2];
+        rng.fill(&mut data2[..]);
+
+        if data1 <= data2 {
+            (data1, data2)
+        } else {
+            (data2, data1)
+        }
+    }
 
     pub fn get_random_bytes(start: usize, end: usize) -> Vec<u8> {
         let mut rng = rand::thread_rng();

@@ -60,28 +60,29 @@ impl SstId {
     }
 }
 
-// In-memory SSTable used for query and compaction.
-#[derive(PartialEq, Eq, Clone)]
-pub struct SSTable {
-    buf: Vec<u8>,       // Store kv pairs only.
-    index: SparseIndex, // Sparse index: key -> offset
-    id: SstId,          // Used for sorting.
+// Used for sorting.
+#[derive(PartialEq, Eq)]
+pub struct SSTMetadata<'a> {
+    pub level: u64,
+    pub id: u64,
+    pub first_key: &'a [u8],
+    pub last_key: &'a [u8],
 }
 
 // For level 0, ordered by create time.
 // For level >= 1, Ordered by level and first key and last key.
-impl Ord for SSTable {
+impl Ord for SSTMetadata<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
-        if self.id.level == 0 && other.id.level == 0 {
-            other.id.id.cmp(&self.id.id)
+        if self.level == 0 && other.level == 0 {
+            other.id.cmp(&self.id)
         } else {
-            let level_cmp = self.id.level.cmp(&other.id.level);
+            let level_cmp = self.level.cmp(&other.level);
             match level_cmp {
                 Ordering::Equal => {
-                    let first_key_cmp = self.index.first_key_value().map(|(k, _)| k).cmp(&other.index.first_key_value().map(|(k, _)| k));
+                    let first_key_cmp = self.first_key.cmp(&other.first_key);
                     match first_key_cmp {
                         Ordering::Equal => {
-                            let last_key_cmp = self.index.last_key_value().map(|(k, _)| k).cmp(&other.index.last_key_value().map(|(k, _)| k));
+                            let last_key_cmp = self.last_key.cmp(&other.last_key);
                             last_key_cmp
                         }
                         _ => first_key_cmp,
@@ -93,6 +94,29 @@ impl Ord for SSTable {
     }
 }
 
+impl PartialOrd for SSTMetadata<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// In-memory SSTable used for query and compaction.
+#[derive(PartialEq, Eq, Clone)]
+pub struct SSTable {
+    buf: Vec<u8>,       // Store kv pairs only.
+    index: SparseIndex, // Sparse index: key -> offset
+    id: SstId,          // Used for sorting.
+}
+
+
+// For level 0, ordered by create time.
+// For level >= 1, Ordered by level and first key and last key.
+impl Ord for SSTable {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.metadata().cmp(&other.metadata())
+    }
+}
+
 impl PartialOrd for SSTable {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -100,9 +124,14 @@ impl PartialOrd for SSTable {
 }
 
 impl SSTable {
+
+    pub fn get_id(&self) -> &SstId {
+        &self.id
+    }
     // Load SSTable from disk.
     // SSTable is named as db_dir/SSTABLE_DIR/level/id.
     pub fn load_by_id(sst_id: &SstId, db_dir: &Path) -> Result<SSTable> {
+        dbg!(format!("load sst by id = {sst_id:#?}"));
         let sst_path = db_dir
             .join(SSTABLE_DIR)
             .join(sst_id.level.to_string())
@@ -129,6 +158,12 @@ impl SSTable {
             id: *sst_id,
         })
     }
+
+    pub fn remove(store_dir: &Path, sst_id: &SstId) -> Result<()> {
+        fs::remove_file(store_dir.join(SSTABLE_DIR).join(sst_id.level.to_string()).join(sst_id.id.to_string()))?;
+        Ok(())
+    }
+
 
 
     // TODO: use chained iterator for level >= 1. Will greatly reduce the number of iterators thus
@@ -200,11 +235,12 @@ impl SSTable {
         Ok(())
     }
 
-    pub fn flush_to_level0(memtable: &MemTable, db_dir: &Path, id: u64) -> Result<()> {
+    fn flush_to_level0_without_manifest(memtable: &MemTable, db_dir: &Path, id: u64) -> Result<()> {
         // Flush memtable to bytes by chunks(records).
         // And generate sparse index.
         // Write to disk.
         ensure!(memtable.len() != 0, "Tried to flush empty memtable");
+
 
         let sst_dir = db_dir.join(SSTABLE_DIR).join("0");
         fs::create_dir_all(&sst_dir)?;
@@ -233,9 +269,33 @@ impl SSTable {
         let encoded = bincode::encode_to_vec(&index, config::standard())?;
         file.write(&encoded)?;
         file.write(&u64::to_be_bytes(encoded.len() as u64))?;
+        file.sync_all()?;
+
         Ok(())
     }
 
+    pub fn flush_to_level0(memtable: &MemTable, db_dir: &Path, manifest: &mut ManifestKeeper) -> Result<SstId> {
+        manifest.batch_start();
+        let sst_id = manifest.latest_sst_id(0);
+        dbg!(format!("Flush memtable to sst {sst_id:#?}"));
+        manifest.new_id(0);
+
+        Self::flush_to_level0_without_manifest(memtable, db_dir, sst_id.id)?;
+
+        // Add new sst to manifest and commit to disk.
+        manifest.add(sst_id, memtable.front().unwrap().0, memtable.back().unwrap().0);
+        manifest.commit()?;
+        Ok(sst_id)
+    }
+
+    pub fn metadata(&self) -> SSTMetadata {
+        SSTMetadata {
+            level: self.id.level,
+            id: self.id.id,
+            first_key: self.index.first_key_value().unwrap().0, // index is granteed to be non-empty.
+            last_key: self.index.last_key_value().unwrap().0,
+        }
+    }
 
     pub fn get(&self, key: &[u8]) -> Option<ValueUpdate> {
         // Query sparse index to find the left iterator where left <= key < right.
@@ -327,6 +387,51 @@ impl<'a> Iterator for SSTableIter<'a> {
     }
 }
 
+// pub struct SSTLevelGroup {
+    // ids: Vec<SstId>,
+    // sstable: SSTable,
+    // store_dir: PathBuf,
+// }
+
+// impl SSTLevelGroup {
+    // pub fn new(level: u64, ids: &[u64], store_dir: &Path, manifest: &Manifest) -> Result<SSTLevelGroup> {
+        // assert!(ids.len() != 0);
+        // let ids = manifest.sort(&ids.iter().map(|&id| SstId { level, id }).collect::<Vec<_>>());
+        // let first_sst_id = ids[0].clone();
+        // Ok(SSTLevelGroup {
+            // ids,
+            // sstable: SSTable::load_by_id(&first_sst_id, store_dir)?,
+            // store_dir: store_dir.to_path_buf(),
+        // })
+    // }
+// }
+
+// pub struct SSTLevelGroupIter<'a> {
+    // id_iter: std::slice::Iter<'a, SstId>,
+    // store_dir: &'a Path,
+    // sstable: &'a mut SSTable,
+    // table_iter: SSTableIter<'a>,
+// }
+
+// impl<'a> Iterator for SSTLevelGroupIter<'a> {
+    // type Item = (Vec<u8>, ValueUpdate);
+
+    // fn next(&mut self) -> Option<Self::Item> {
+        // loop {
+            // if let Some(it) = self.table_iter.next() {
+                // return Some(it);
+            // } else {
+                // if let Some(id) = self.id_iter.next() {
+                    // *self.sstable = SSTable::load_by_id(id, self.store_dir).unwrap();
+                    // self.table_iter = self.sstable.iter();
+                // } else {
+                    // return None;
+                // }
+            // }
+        // }
+    // }
+// }
+
 // Owner of a group of sstables.
 // When iterating, order of sstables is priority.
 // The smaller the higher.
@@ -369,7 +474,10 @@ impl SSTGroup {
         // Collect current items and filter out None.
         //
         // Prepare the dest file.
-        let mut sst_id = manifest.new_id(dest_level)?;
+        let ids = self.sstables.iter().map(|s| s.get_id()).collect::<Vec<_>>();
+        dbg!(format!("Compact ssts {ids:#?}"));
+        let mut sst_id = manifest.latest_sst_id(dest_level);
+        manifest.new_id(dest_level);
         let mut file = sst_id.create_file(db_dir)?;
 
         let mut index = SparseIndex::new();
@@ -378,8 +486,12 @@ impl SSTGroup {
         let mut offset = 0;
         let mut previous_size = 0;
         let mut previous_key = Vec::new();
+        let should_purge_tombstone = dest_level >= manifest.max_level();
 
         for (k, v) in SSTable::iter_combined(&self.sstables[..])? {
+            if v == ValueUpdate::Tombstone && should_purge_tombstone {
+                continue;
+            }
             let encoded = bincode::encode_to_vec((&k, &v), config::standard())?;
             // Check whether we should write to a new sstable file.
             if offset + encoded.len() > SSTABLE_FILE_SIZE as usize {
@@ -390,11 +502,12 @@ impl SSTGroup {
                 file.write(&u64::to_be_bytes(encoded.len() as u64))?;
                 file.sync_all()?;
                 // Add it to manifest.
-                manifest.add(sst_id, index.first_key_value().unwrap().0, index.last_key_value().unwrap().0)?;
+                manifest.add(sst_id, index.first_key_value().unwrap().0, index.last_key_value().unwrap().0);
                 //
                 // Create a new sstable file.
                 // Reset per file variables.
-                sst_id = manifest.new_id(dest_level)?;
+                sst_id = SstId { level: dest_level, id: sst_id.id + 1 };
+                manifest.new_id(dest_level);
                 file = sst_id.create_file(db_dir)?;
                 index = SparseIndex::new();
                 num_count = 0;
@@ -419,13 +532,11 @@ impl SSTGroup {
         file.write(&u64::to_be_bytes(encoded.len() as u64))?;
         file.sync_all()?;
         // Add it to manifest.
-        manifest.add(sst_id, index.first_key_value().unwrap().0, index.last_key_value().unwrap().0)?;
+        manifest.add(sst_id, index.first_key_value().unwrap().0, index.last_key_value().unwrap().0);
 
+        // Finishing compaction.
+        manifest.commit()?;
 
-        // Remove obsolete sst files.
-        for sst in &self.sstables {
-            manifest.remove(&sst.id)?;
-        }
         Ok(())
     }
 
@@ -656,7 +767,7 @@ mod tests {
 
         // Flush memtable to level 0 SStable file.
         let test_dir_path = create_test_dir()?;
-        SSTable::flush_to_level0(&memtable, &test_dir_path, 0)?;
+        SSTable::flush_to_level0_without_manifest(&memtable, &test_dir_path, 0)?;
 
         // Load SStable file and check data.
         let sst_id = SstId { level: 0, id: 0 };
@@ -697,7 +808,7 @@ mod tests {
                 whole.insert(k.to_vec(), v.clone());
             }
 
-            SSTable::flush_to_level0(&memtable, &test_dir_path, i)?;
+            SSTable::flush_to_level0_without_manifest(&memtable, &test_dir_path, i)?;
         }
 
         // Notice order. Younger ones come first.
@@ -738,8 +849,7 @@ mod tests {
         for _ in 0..4 {
             let memtable = new_random_memtable();
             let sst_id = manifest.new_sst_id(0);
-            SSTable::flush_to_level0(&memtable, &test_dir_path, sst_id.id)?;
-            manifest.add_sst(sst_id, memtable.front().unwrap().0, memtable.back().unwrap().0);
+            SSTable::flush_to_level0_without_manifest(&memtable, &test_dir_path, sst_id.id)?;
             sst_ids.push(sst_id);
         }
         sst_ids.sort();
@@ -775,5 +885,10 @@ mod tests {
         //
         // Compact 1 level 1 and its overlapping level 2 SSTables.
         Ok(())
+    }
+
+    #[test]
+    fn test_purge_tombstone() -> Result<()> {
+        todo!();
     }
 }
