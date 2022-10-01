@@ -15,11 +15,12 @@ use std::path::{Path, PathBuf};
 use std::cmp::Ordering;
 use std::rc::Rc;
 
-use crate::memtable::{MemTable, ValueUpdate};
+use crate::memtable::{ValueUpdate, MemTableKeeper, MemTable};
 use crate::manifest::*;
 
 use anyhow::{ensure, anyhow, Result};
 use bincode::{config, Encode, Decode};
+use ouroboros::self_referencing;
 
 pub const SSTABLE_DIR: &str = "SST";
 pub const SPARSE_INDEX_INTERVAL: u64 = 16;
@@ -79,11 +80,10 @@ impl Ord for SSTMetadata<'_> {
             let level_cmp = self.level.cmp(&other.level);
             match level_cmp {
                 Ordering::Equal => {
-                    let first_key_cmp = self.first_key.cmp(&other.first_key);
+                    let first_key_cmp = self.first_key.cmp(other.first_key);
                     match first_key_cmp {
                         Ordering::Equal => {
-                            let last_key_cmp = self.last_key.cmp(&other.last_key);
-                            last_key_cmp
+                            self.last_key.cmp(other.last_key)
                         }
                         _ => first_key_cmp,
                     }
@@ -196,7 +196,7 @@ impl SSTable {
         let mut offset = 0;
         let mut previous_size = 0;
         let mut previous_key = Vec::new();
-        let mut sstables = sst_ids.iter().map(|id| Self::load_by_id(&id, db_dir)).collect::<Result<Vec<_>>>()?;
+        let mut sstables = sst_ids.iter().map(|id| Self::load_by_id(id, db_dir)).collect::<Result<Vec<_>>>()?;
         sstables.sort();
 
         for (k, v) in Self::iter_combined(&sstables[..])? {
@@ -206,8 +206,8 @@ impl SSTable {
                 // Write sparse index.
                 index.insert(previous_key, offset - previous_size);
                 let encoded = bincode::encode_to_vec(&index, config::standard())?;
-                file.write(&encoded)?;
-                file.write(&u64::to_be_bytes(encoded.len() as u64))?;
+                file.write_all(&encoded)?;
+                file.write_all(&u64::to_be_bytes(encoded.len() as u64))?;
                 // Create a new sstable file.
                 // Reset per file variables.
                 file = manifest.new_sst_id(dest_level).create_file(db_dir)?;
@@ -215,7 +215,7 @@ impl SSTable {
                 num_count = 0;
                 offset = 0;
             }
-            file.write(&encoded)?;
+            file.write_all(&encoded)?;
             if num_count % SPARSE_INDEX_INTERVAL == 0 {
                 index.insert(k.clone(), offset);
             }
@@ -230,8 +230,8 @@ impl SSTable {
 
         // Write sparse index.
         let encoded = bincode::encode_to_vec(&index, config::standard())?;
-        file.write(&encoded)?;
-        file.write(&u64::to_be_bytes(encoded.len() as u64))?;
+        file.write_all(&encoded)?;
+        file.write_all(&u64::to_be_bytes(encoded.len() as u64))?;
         Ok(())
     }
 
@@ -239,7 +239,7 @@ impl SSTable {
         // Flush memtable to bytes by chunks(records).
         // And generate sparse index.
         // Write to disk.
-        ensure!(memtable.len() != 0, "Tried to flush empty memtable");
+        ensure!(!memtable.is_empty(), "Tried to flush empty memtable");
 
 
         let sst_dir = db_dir.join(SSTABLE_DIR).join("0");
@@ -256,8 +256,8 @@ impl SSTable {
                 index.insert(pair.0.clone(), offset);
             }
 
-            let encoded = bincode::encode_to_vec(&pair, config::standard())?;
-            file.write(&encoded)?;
+            let encoded = bincode::encode_to_vec(pair, config::standard())?;
+            file.write_all(&encoded)?;
             offset += encoded.len();
             previous_size = encoded.len();
         }
@@ -267,24 +267,25 @@ impl SSTable {
 
         // Write sparse index.
         let encoded = bincode::encode_to_vec(&index, config::standard())?;
-        file.write(&encoded)?;
-        file.write(&u64::to_be_bytes(encoded.len() as u64))?;
+        file.write_all(&encoded)?;
+        file.write_all(&u64::to_be_bytes(encoded.len() as u64))?;
         file.sync_all()?;
 
         Ok(())
     }
 
-    pub fn flush_to_level0(memtable: &MemTable, db_dir: &Path, manifest: &mut ManifestKeeper) -> Result<SstId> {
+    pub fn flush_to_level0(memtable: &mut MemTableKeeper, db_dir: &Path, manifest: &mut ManifestKeeper) -> Result<SstId> {
         manifest.batch_start();
         let sst_id = manifest.latest_sst_id(0);
         dbg!(format!("Flush memtable to sst {sst_id:#?}"));
         manifest.new_id(0);
 
-        Self::flush_to_level0_without_manifest(memtable, db_dir, sst_id.id)?;
+        Self::flush_to_level0_without_manifest(memtable.container(), db_dir, sst_id.id)?;
 
         // Add new sst to manifest and commit to disk.
         manifest.add(sst_id, memtable.front().unwrap().0, memtable.back().unwrap().0);
         manifest.commit()?;
+        memtable.reset()?;
         Ok(sst_id)
     }
 
@@ -312,11 +313,9 @@ impl SSTable {
                     offset_end = *next_v;
                     break;
                 }
-            } else {
-                if &k[..] <= key {
-                    offset = *v;
-                    break;
-                }
+            } else if &k[..] <= key {
+                offset = *v;
+                break;
             }
         }
 
@@ -326,13 +325,9 @@ impl SSTable {
     }
 
     pub fn iter(&self) -> SSTableIter {
-        SSTableIter {
-            buf: &self.buf,
-            cur: 0,
-            end: self.buf.len(),
-            done: false,
-        }
+        self.iter_at(0)
     }
+
 
     fn iter_at(&self, start: usize) -> SSTableIter<'_> {
         SSTableIter {
@@ -387,50 +382,59 @@ impl<'a> Iterator for SSTableIter<'a> {
     }
 }
 
-// pub struct SSTLevelGroup {
-    // ids: Vec<SstId>,
-    // sstable: SSTable,
-    // store_dir: PathBuf,
-// }
+pub struct SSTLevelGroup {
+    ids: Vec<SstId>,
+    store_dir: PathBuf,
+}
 
-// impl SSTLevelGroup {
-    // pub fn new(level: u64, ids: &[u64], store_dir: &Path, manifest: &Manifest) -> Result<SSTLevelGroup> {
-        // assert!(ids.len() != 0);
-        // let ids = manifest.sort(&ids.iter().map(|&id| SstId { level, id }).collect::<Vec<_>>());
-        // let first_sst_id = ids[0].clone();
-        // Ok(SSTLevelGroup {
-            // ids,
-            // sstable: SSTable::load_by_id(&first_sst_id, store_dir)?,
-            // store_dir: store_dir.to_path_buf(),
-        // })
-    // }
-// }
+impl SSTLevelGroup {
+    pub fn new(level: u64, ids: &[u64], store_dir: &Path, manifest: &Manifest) -> Result<SSTLevelGroup> {
+        assert!(ids.len() != 0);
+        let ids = manifest.sort(&ids.iter().map(|&id| SstId { level, id }).collect::<Vec<_>>());
+        let first_sst_id = ids[0].clone();
+        Ok(SSTLevelGroup {
+            ids,
+            store_dir: store_dir.to_path_buf(),
+        })
+    }
+}
 
-// pub struct SSTLevelGroupIter<'a> {
-    // id_iter: std::slice::Iter<'a, SstId>,
-    // store_dir: &'a Path,
-    // sstable: &'a mut SSTable,
-    // table_iter: SSTableIter<'a>,
-// }
+#[self_referencing]
+pub struct SSTLevelGroupIter<'a> {
+    id_iter: std::slice::Iter<'a, SstId>,
+    store_dir: &'a Path,
+    sstable: SSTable,
+    #[borrows(sstable)]
+    #[covariant]
+    table_iter: Option<SSTableIter<'this>>,
+}
 
-// impl<'a> Iterator for SSTLevelGroupIter<'a> {
-    // type Item = (Vec<u8>, ValueUpdate);
+impl<'a> Iterator for SSTLevelGroupIter<'a> {
+    type Item = Result<(Vec<u8>, ValueUpdate)>;
 
-    // fn next(&mut self) -> Option<Self::Item> {
-        // loop {
-            // if let Some(it) = self.table_iter.next() {
-                // return Some(it);
-            // } else {
-                // if let Some(id) = self.id_iter.next() {
-                    // *self.sstable = SSTable::load_by_id(id, self.store_dir).unwrap();
-                    // self.table_iter = self.sstable.iter();
-                // } else {
-                    // return None;
-                // }
-            // }
-        // }
-    // }
-// }
+    fn next(&mut self) -> Option<Self::Item> {
+        self.with_mut(|fields| {
+            loop {
+                if let Some(table_it) = fields.table_iter {
+                    if let Some(it) = table_it.next() {
+                        return Some(Ok(it));
+                    } else if let Some(id) = fields.id_iter.next() {
+                        *fields.table_iter = None;
+                        let wrapped_sst = SSTable::load_by_id(id, fields.store_dir);
+                        match wrapped_sst {
+                            Ok(sst) => { *fields.sstable = sst;},
+                            Err(err) => { return Some(Err(err)); },
+                        };
+                    } else {
+                        return None;
+                    }
+                } else {
+                    *fields.table_iter = Some(fields.sstable.iter());
+                }
+            };
+        })
+    }
+}
 
 // Owner of a group of sstables.
 // When iterating, order of sstables is priority.
@@ -441,7 +445,7 @@ pub struct SSTGroup {
 
 impl SSTGroup {
     pub fn new(sst_ids: &[SstId], db_dir: &Path) -> Result<SSTGroup> {
-        let mut sstables = sst_ids.iter().map(|id| SSTable::load_by_id(&id, &db_dir)).collect::<Result<Vec<_>>>()?;
+        let mut sstables = sst_ids.iter().map(|id| SSTable::load_by_id(id, db_dir)).collect::<Result<Vec<_>>>()?;
         sstables.sort();
         Ok(SSTGroup {
             sstables,
@@ -498,8 +502,8 @@ impl SSTGroup {
                 // Write sparse index.
                 index.insert(previous_key, offset - previous_size);
                 let encoded = bincode::encode_to_vec(&index, config::standard())?;
-                file.write(&encoded)?;
-                file.write(&u64::to_be_bytes(encoded.len() as u64))?;
+                file.write_all(&encoded)?;
+                file.write_all(&u64::to_be_bytes(encoded.len() as u64))?;
                 file.sync_all()?;
                 // Add it to manifest.
                 manifest.add(sst_id, index.first_key_value().unwrap().0, index.last_key_value().unwrap().0);
@@ -513,7 +517,7 @@ impl SSTGroup {
                 num_count = 0;
                 offset = 0;
             }
-            file.write(&encoded)?;
+            file.write_all(&encoded)?;
             if num_count % SPARSE_INDEX_INTERVAL == 0 {
                 index.insert(k.clone(), offset);
             }
@@ -528,8 +532,8 @@ impl SSTGroup {
 
         // Write sparse index.
         let encoded = bincode::encode_to_vec(&index, config::standard())?;
-        file.write(&encoded)?;
-        file.write(&u64::to_be_bytes(encoded.len() as u64))?;
+        file.write_all(&encoded)?;
+        file.write_all(&u64::to_be_bytes(encoded.len() as u64))?;
         file.sync_all()?;
         // Add it to manifest.
         manifest.add(sst_id, index.first_key_value().unwrap().0, index.last_key_value().unwrap().0);
@@ -556,7 +560,7 @@ impl<'a> Iterator for SSTGroupIter<'a> {
                 let items = self.iter_list
                     .iter_mut()
                     .enumerate()
-                    .filter_map(|(i, it)| it.peek().map_or(None, |peeked| Some((i, peeked))));
+                    .filter_map(|(i, it)| it.peek().map(|peeked| (i, peeked)));
                 items.min_by_key(|(_, (k, _))| k).map(|(i, _)| i)
             };
             if let Some(i) = min_index {
@@ -672,7 +676,7 @@ impl<'a> Iterator for CombinedIter<'a> {
                 let items = self.iter_list
                     .iter_mut()
                     .enumerate()
-                    .filter_map(|(i, it)| it.peek().map_or(None, |peeked| Some((i, peeked))));
+                    .filter_map(|(i, it)| it.peek().map(|peeked| (i, peeked)));
                 items.min_by_key(|(_, (k, _))| k).map(|(i, _)| i)
             };
             if let Some(i) = min_index {
@@ -713,7 +717,7 @@ impl Iterator for GeneralCombinedIter {
                 let items = self.iter_list
                     .iter_mut()
                     .enumerate()
-                    .filter_map(|(i, it)| it.peek().map_or(None, |peeked| Some((i, peeked))));
+                    .filter_map(|(i, it)| it.peek().map(|peeked| (i, peeked)));
                 items.min_by_key(|(_, (k, _))| k).map(|(i, _)| i)
             };
             if let Some(i) = min_index {
@@ -781,7 +785,7 @@ mod tests {
 
         // Compare using SSTable::get().
         for (k, v) in memtable.iter() {
-            if &sst.get(k).ok_or(anyhow!(
+            if &sst.get(k).ok_or_else(|| anyhow!(
                 "No requested key in SSTable according to SSTable::get()"
             ))? != v
             {
@@ -824,7 +828,7 @@ mod tests {
 
         sstables.sort();
         let combined_iter = SSTable::iter_combined(&sstables[..])?;
-        ensure!(whole.len() != 0, "The whole memtable is empty");
+        ensure!(!whole.is_empty(), "The whole memtable is empty");
         ensure!(whole.len() == SSTable::iter_combined(&sstables[..])?.count(), "The whole memtable has different count from the combined iterator");
         if !combined_iter
             .eq_by(whole.iter(), |(sk, sv), (mk, mv)| &sk == mk && &sv == mv)
@@ -887,8 +891,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_purge_tombstone() -> Result<()> {
-        todo!();
-    }
+    // #[test]
+    // fn test_purge_tombstone() -> Result<()> {
+        // todo!();
+    // }
 }

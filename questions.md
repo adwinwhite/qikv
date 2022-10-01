@@ -329,10 +329,19 @@ How to write crash recovery test?
 	Client-Server model.
 	Check whether client sees consistent data.
 
+Why does recovered memtable appear totally different?
+	But occasionally it is consistent.
+	Forgot to join thread so data writing may not be completed.
+
+How to iterate pairs in the whole store?
+	Combined iterator from { memtable, level0 ssts, level iterators }.
+	How to implement level iterator in a lazy way?
+		Self referential.
+		Change borrowed and borrowing reference at the same time.
+
 
 Todo!
-	Overwrite file corrupted part.
-	Write manifest recovery test. (use commit())
+	Iterate the whole kvstore.
 	Crash recovery.
 		Manifest recovery.
 		Memtable recovery.

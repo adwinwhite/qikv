@@ -2,10 +2,10 @@
 #![feature(map_first_last)]
 #![feature(iter_order_by)]
 #![feature(is_sorted)]
+#![feature(let_chains)]
 
 #![allow(unused_imports)]
 
-pub mod log;
 pub mod memtable;
 pub mod sstable;
 pub mod manifest;

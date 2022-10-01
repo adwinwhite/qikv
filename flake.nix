@@ -19,7 +19,9 @@
       {
         devShell = mkShell {
           buildInputs = [
-            (rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
+            (rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
+              extensions = [ "rust-src" "rust-analyzer" ];
+            }))           
             lldb
           ];
 
