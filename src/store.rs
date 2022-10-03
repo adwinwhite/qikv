@@ -43,24 +43,23 @@ impl Store {
         Ok(())
     }
 
-    pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         if !self.bloom.contains(key) {
-            return None;
+            return Ok(None);
         }
 
         // The key possibly exists.
         // Check memtable and then sstables.
         match self.memtable.get(&key.to_vec()) {
             Some(update) => match update {
-                ValueUpdate::Value(v) => Some(v.clone()),
-                ValueUpdate::Tombstone => None,
+                ValueUpdate::Value(v) => Ok(Some(v.clone())),
+                ValueUpdate::Tombstone => Ok(None),
             },
             None => {
-                let group = SSTGroup::new(&self.manifest.get_sst_by_key(key), &self.dir)
-                    .expect("Failed to load SSTable");
-                match group.get(key) {
-                    Some(ValueUpdate::Tombstone) | None => None,
-                    Some(ValueUpdate::Value(v)) => Some(v),
+                let group = SSTGroup::new(&self.manifest.get_sst_by_key(key), &self.dir)?;
+                match group.get(key)? {
+                    Some(ValueUpdate::Tombstone) | None => Ok(None),
+                    Some(ValueUpdate::Value(v)) => Ok(Some(v)),
                 }
             }
         }
@@ -224,7 +223,7 @@ mod tests {
 
         for (i, (k, v)) in good_map.iter().enumerate() {
             if &store
-                .get(k)
+                .get(k)?
                 .ok_or_else(|| anyhow!("Store is missing {i}th pair"))?
                 != v
             {

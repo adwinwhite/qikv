@@ -3,6 +3,8 @@
 #![feature(iter_order_by)]
 #![feature(is_sorted)]
 #![feature(let_chains)]
+#![feature(try_find)]
+
 
 #![allow(unused_imports)]
 
