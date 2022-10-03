@@ -338,6 +338,8 @@ How to iterate pairs in the whole store?
 	How to implement level iterator in a lazy way?
 		Self referential.
 		Change borrowed and borrowing reference at the same time.
+			Wrap the self-referencial part into another sub-struct presented as a single field in the original iterator.
+			And replace it as a whole.
 
 
 Todo!
