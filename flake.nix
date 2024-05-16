@@ -19,7 +19,9 @@
       {
         devShell = mkShell {
           buildInputs = [
-            rust-bin.nightly.latest.default
+            (rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
+              extensions = [ "rust-src" "rust-analyzer" ];
+            }))           
             lldb
           ];
 

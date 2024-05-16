@@ -179,4 +179,196 @@ OO or functional?
 How to organize modules?
 	Manifest depends on SStables or vice versa.
 
+I don't understand lifetimes in Rust at all!
+	I got it.
+	Lifetime is a period in that owned value doesn't change its memory location(aka not moved or dropped).
+	<'a> means there must exist some lifetime "a"
+	In a function, all input references annotated with "a" must be valid in "a", and output references annotated with "a" are only valid in "a".
+	For struct, it's the same. Just think in terms of its constructor and the constructed instance as the output reference.
+
+Should I seperate sparse index from actual data?
+
+I should make a more general combined iterator that can combine iterators from memtable and so on. 
+	Use trait object.
+
+What about error handling? Fail to load SST file?
+	Panic bravely? 
+	Only panic in main()?
+
+Why doesn't level 1 sst file exist?
+	Check whether it's created first.
+	Read the wrong path.
+
+How to recover from crash? Log replay + snapshot.
+	memtable from log.
+	manifest from another log.
+	bloomfilter?
+
+How to record operations?
+	Use newtype pattern to warp old structs?
+		requires new function name.
+		need to disable unrecorded function version.
+
+How to avoid half snapshot of manifest?
+	Only switch after the new snapshot is completely created.
+
+How to ensure atomicity of recording and operation?
+
+How to initialize from normal exit?
+	new empty memtable.
+	manfest from directories/files.
+
+How to implement crash recovery for manifest?
+	Manifest only changes in two operations: flush level 0 and compact.
+	We need to make sure they are atomic so that whenever we look into manifest, it's a valid view.
+
+How does ssts changes in manifest?
+	Only two ways: flush level 0 and compact.
+	Let's make them atomic.
+
+How does other fields change in manifest?
+	NewId in flushing level 0 and compaction.
+	NextCompact only in compaction.
+
+How to make sst_id update atomic in compaction?
+	Do not change in-memory manifest.
+	Add changes to manifest to a commit batch while doing compaction.
+	After compaction completes, append the batch to log in a single O_DIRECT | O_SYNC write.(This is the mark of completion. If crash happends before, the changes just don't exist. Otherwise, they come to effect.)
+	Apply changes to in-memory structure.
+	Clean up obsolete files.
+
+	Do the same for flushing level 0 SST.
+	So I don't need to wrap around operations of manifest. Just log them.
+
+How can get return value if not making changes to manifest?
+	Multiple version?
+		That's too strong.
+		We are single threaded.
+	Clone?
+		Too much cost.
+	Assign action an index monotonically?
+	Seperate get and set operations.
+		And view/change a local state(clone parial manifest).
+			new_id => just a u64.
+			compact_key => only use once in one compaction.
+
+Can I combine new_id log and latest_id?
+	No, use local state.
+
+When to snapshot manifest?
+
+
+How to test manifest recovery?
+	1. test fresh start.
+	2. test normal exit.
+	3. test crash recovery.
+		How to make it crash?
+			Spawn a subprocess and kill it later.
+		How to check its consistency?
+			It can only be one of two valid states.
+			And they have equivalent data.
+				For flush_level0, recover memtable first.
+
+What if bloomfilter grows too large?
+
+How to check memtable's size without counting every insertion?
+
+How to purge useless Tombstones?
+	Check level in compaction.
+
+Why use lazy loading of SST?
+	In large levels, there might be many overlappings.
+
+How to simplify sstable.rs?
+	SSTGroup is too general.
+	Only need to consider two kinds of compaction: compact level 0 and above.
+		Both can use a combined iterator of level L and L + 1. 
+			Level 0: a combined iterator of level 0 sst and a level iterator of level 1.
+			Level >= 1: a sst iterator of level L and a level iterator of level L + 1.
+		Level iterator can be lazy since they are not overlapped.
+
+How to sort sst easily and lazily?
+	Compaction often requires sorted sst.
+	And lazy loading requires sorting before loading.
+	Sorting sst above level 0 requires only key ranges.
+
+Why test_check_sst_size() fails sometimes?
+	Failure reasons: 
+		Bincode failed to decode SST file - {Unexpected End, Invalid Integer Type}. (sstable.rs:146)
+			Whether are they all in level 0?
+				Yes, and they are all the first load { level = 0, id = 0 }.
+		Panicked at "attempt to substract with overflow". (sstable.rs:143)
+			Write twice to sst_id { level = 0, id = 0 }.
+			And only synced data.
+			So the reader may get wrong file metadata like length and parsed invalid footer.
+	Abnormal Observation:
+		Flush memtable twice consecutively to { level = 0, id = 0 }.
+			Use id = 0 twice.
+			Bad initialization in manifest.next_sst_id().
+	Add a test for this. (Done)
+
+Is there a generic way of recovering a state machine?
+	Like a proc macro.
+	So that I don't have to implement the same idea twice for manifest and memtable.
+
+What if data is too large for log write to be atomic?
+	Use a scalar to represent the latest successfully write index.
+	Use a scalar to represent the latest successfully write offset.
+	Use a commit action to represent the batch has been successfully written.
+		But there maybe half-written batch which will cause decode error.
+			And we can't make the naive assumption that all decode error is due to half-written batch.
+			Or we can.
+
+How to implement crash recovery?
+	Manifest recovery.
+	Memtable recovery.
+	Do I need to recover bloomfilter too?
+		Easy if it's gracefully closed.
+
+How to write crash recovery test?
+	Client-Server model.
+	Check whether client sees consistent data.
+
+Why does recovered memtable appear totally different?
+	But occasionally it is consistent.
+	Forgot to join thread so data writing may not be completed.
+
+How to iterate pairs in the whole store?
+	Combined iterator from { memtable, level0 ssts, level iterators }.
+	How to implement level iterator in a lazy way?
+		Self referential.
+		Change borrowed and borrowing reference at the same time.
+			Wrap the self-referencial part into another sub-struct presented as a single field in the original iterator.
+			And replace it as a whole.
+
+
+Todo!
+	Iterate the whole kvstore.
+	Crash recovery.
+		Manifest recovery.
+		Memtable recovery.
+	Purge useless Tombstones.
+	Avoid copy in iterator.
+	Simplify sstable.rs.
+	Test manifest recovery in store.rs.
+	Support concurrency.
+	Support transaction.
+	Check levelDB and RocksDB's in-memory SSTable.
+	Improve Iterator so that it can return references or what.
+		Use custom encoding.
+			Type mismatch.
+				Which with which?
+		Zero-copy serde/deserde.
+	Or easy construction.
+		Create an owned type to hold sstables.
+			Then where to place it?
+		Let's creata a sst manager to own all active sstables.
+			And a sst cheap handle?
+	Lazy load of a level to use only one iterator.
+	Iterator over whole db.
+	Well consider lazy load later:
+		SSTable lazy load.
+		Lazy get().
+		Lazy compaction? (Seems not necessary)
+
 
